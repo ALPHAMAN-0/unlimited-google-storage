@@ -23,7 +23,6 @@ next-env.d.ts
 .DS_Store
 *.pem
 .idea
-.vscode
 
 # debug
 npm-debug.log*
@@ -32,8 +31,6 @@ yarn-error.log*
 .pnpm-debug.log*
 
 # local env files
-.env
-.env.local
 .env.development.local
 .env.test.local
 .env.production.local
@@ -47,3 +44,4 @@ prisma/migrations/dev/
 .history
 *.swp
 *.swo
+config.bat
