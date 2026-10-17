@@ -1,0 +1,131 @@
+// Unlimited Google Storage — data model.
+//
+// `User`              — a person who has signed in. Each user can link N Google
+//                       accounts; each link has its own storage quota.
+// `Account`/`Session` — NextAuth tables for the *sign-in* account (one per user).
+// `GoogleLink`        — a linked Google account that stores files on the user's
+//                       behalf. Refresh + access tokens are AES-256-GCM
+//                       encrypted before being persisted (see src/lib/crypto).
+// `File`              — one Drive file we created, owned by one link.
+// `UploadJob`         — long-running resumable upload state. Lets the client
+//                       PUT chunks against a `sessionUri` and re-attach after
+//                       a network drop without starting over.
+//
+// Bytes are stored as BigInt so a single 5 TB upload fits without precision
+// loss (JS number can only represent integers up to 2^53 - 1 ≈ 9 PB).
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id            String       @id @default(cuid())
+  email         String       @unique
+  name          String?
+  image         String?
+  emailVerified DateTime?
+  createdAt     DateTime     @default(now())
+  updatedAt     DateTime     @updatedAt
+
+  googleLinks   GoogleLink[]
+  files         File[]
+  uploadJobs    UploadJob[]
+}
+
+model GoogleLink {
+  id             String   @id @default(cuid())
+  userId         String
+  user           User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  // Identity
+  googleUserId   String   // stable Google `sub`
+  googleEmail    String   @unique
+
+  // Encrypted credentials (AES-256-GCM, see src/lib/crypto)
+  accessToken    String   // encrypted
+  refreshToken   String?  // encrypted; present only on initial OAuth
+  expiresAt      DateTime
+  scope          String
+
+  // Storage meter (BigInt bytes)
+  storageUsed    BigInt   @default(0)
+  storageLimit   BigInt   @default(15000000000) // 15 GB default for free accounts
+  lastSyncedAt   DateTime?
+
+  // Selection bookkeeping
+  status         LinkStatus @default(ACTIVE)
+  lastUsedAt     DateTime?
+
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  files          File[]
+  uploadJobs     UploadJob[]
+
+  @@unique([userId, googleUserId])
+  @@index([userId])
+}
+
+enum LinkStatus {
+  ACTIVE
+  REVOKED
+  ERROR
+}
+
+model File {
+  id            String   @id @default(cuid())
+  userId        String
+  user          User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  googleLinkId  String
+  googleLink    GoogleLink @relation(fields: [googleLinkId], references: [id], onDelete: Cascade)
+
+  driveFileId   String   @unique
+  name          String
+  mimeType      String
+  size          BigInt
+
+  uploadedAt    DateTime @default(now())
+  deletedAt     DateTime?
+
+  @@index([userId, uploadedAt])
+  @@index([googleLinkId])
+}
+
+model UploadJob {
+  id                  String   @id @default(cuid())
+  userId              String
+  user                User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  googleLinkId        String
+  googleLink          GoogleLink @relation(fields: [googleLinkId], references: [id], onDelete: Cascade)
+
+  fileName            String
+  fileSize            BigInt
+  mimeType            String
+  uploadedBytes       BigInt  @default(0)
+
+  // Google's resumable upload session URI. We store it so a chunked PUT can
+  // resume even across server restarts.
+  sessionUri          String?
+  driveFileId         String?
+
+  status              UploadStatus @default(PENDING)
+  error               String?
+
+  createdAt           DateTime @default(now())
+  completedAt         DateTime?
+  updatedAt           DateTime @updatedAt
+
+  @@index([userId, status])
+}
+
+enum UploadStatus {
+  PENDING
+  IN_PROGRESS
+  COMPLETED
+  FAILED
+}
