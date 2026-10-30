@@ -4,8 +4,13 @@
  * Returns `{ userId }` if the caller is signed in (their JWT carries a
  * userId), otherwise returns a 401 Response. Routes call this at the top
  * before touching any DB row or Drive call.
+ *
+ * `requireUserForMutation` additionally enforces CSRF protection (origin
+ * check + double-submit token). Every state-changing route should use it.
  */
+import { cookies } from "next/headers";
 import { auth } from "@/lib/auth";
+import { assertCsrf, CSRF_COOKIE } from "@/lib/csrf";
 
 export interface AuthedUser {
   userId: string;
@@ -36,6 +41,33 @@ export async function requireUser(): Promise<AuthResult> {
     };
   }
   return { ok: true, user: { userId: id, email: session.user.email ?? "" } };
+}
+
+/**
+ * Auth + CSRF guard for state-changing requests.
+ *
+ * The CSRF failure is reported as 403 with a generic body. We deliberately
+ * do not echo *why* the check failed back to the client beyond a coarse
+ * reason, and we never leak the expected token value.
+ */
+export async function requireUserForMutation(req: Request): Promise<AuthResult> {
+  const authResult = await requireUser();
+  if (!authResult.ok) return authResult;
+
+  const store = await cookies();
+  const cookieToken = store.get(CSRF_COOKIE)?.value;
+  const csrf = assertCsrf(req, cookieToken);
+  if (!csrf.ok) {
+    return {
+      ok: false,
+      response: new Response(JSON.stringify({ error: "forbidden" }), {
+        status: 403,
+        headers: { "Content-Type": "application/json" },
+      }),
+    };
+  }
+
+  return authResult;
 }
 
 export function jsonError(message: string, status: number): Response {

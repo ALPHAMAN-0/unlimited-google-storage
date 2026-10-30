@@ -3,11 +3,14 @@ import Link from "next/link";
 import { auth, signOut } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { Button } from "@/components/ui/button";
-import { Cloud, RefreshCw, Plus, LogOut } from "lucide-react";
+import { Cloud, Plus, LogOut } from "lucide-react";
 import { AccountCard, type AccountCardData } from "@/components/account-card";
 import { UploadDropzone } from "@/components/upload-dropzone";
 import { FileTable, type FileRow } from "@/components/file-table";
+import { SyncButton } from "@/components/sync-button";
 import { formatBytes } from "@/lib/format";
+import { ensureCsrfToken, clearCsrfToken } from "@/lib/csrf";
+import { sanitizeLinkError } from "@/lib/validate";
 
 export const dynamic = "force-dynamic";
 
@@ -23,6 +26,14 @@ export default async function DashboardPage({
   }
   const userId = (session.user as { id?: string }).id!;
   const userEmail = session.user.email ?? "";
+
+  // Issue the CSRF token and hand it to the client components so they can
+  // attach it to state-changing requests. The cookie itself is httpOnly.
+  const csrfToken = await ensureCsrfToken();
+
+  // Never reflect an arbitrary error string into the page. Sanitise it to a
+  // short, safe, human-readable token first.
+  const linkError = sp.link_error ? sanitizeLinkError(sp.link_error) : null;
 
   const [links, files, totals] = await Promise.all([
     prisma.googleLink.findMany({
@@ -77,6 +88,9 @@ export default async function DashboardPage({
 
   async function logout() {
     "use server";
+    // Drop the CSRF token alongside the session so a stale token can never
+    // be reused after sign-out.
+    await clearCsrfToken();
     await signOut({ redirectTo: "/" });
   }
 
@@ -114,7 +128,7 @@ export default async function DashboardPage({
             role="alert"
             className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive"
           >
-            Couldn&apos;t link that account: {decodeURIComponent(sp.link_error)}
+            Couldn&apos;t link that account: {linkError}
           </div>
         )}
 
@@ -129,12 +143,7 @@ export default async function DashboardPage({
               </p>
             </div>
             <div className="flex items-center gap-2">
-              <form action="/api/links/sync" method="post">
-                <Button type="submit" variant="outline" size="sm">
-                  <RefreshCw className="h-4 w-4" />
-                  Refresh
-                </Button>
-              </form>
+              <SyncButton csrfToken={csrfToken} />
               <Link href="/api/auth/link">
                 <Button size="sm">
                   <Plus className="h-4 w-4" />
@@ -161,7 +170,7 @@ export default async function DashboardPage({
           ) : (
             <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
               {accountData.map((a) => (
-                <AccountCard key={a.id} account={a} />
+                <AccountCard key={a.id} account={a} csrfToken={csrfToken} />
               ))}
             </div>
           )}
@@ -170,13 +179,13 @@ export default async function DashboardPage({
         {accountData.length > 0 && (
           <section>
             <h2 className="text-xl font-semibold mb-4">Upload</h2>
-            <UploadDropzone />
+            <UploadDropzone csrfToken={csrfToken} />
           </section>
         )}
 
         <section>
           <h2 className="text-xl font-semibold mb-4">Your files</h2>
-          <FileTable files={fileRows} />
+          <FileTable files={fileRows} csrfToken={csrfToken} />
         </section>
       </main>
     </div>

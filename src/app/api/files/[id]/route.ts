@@ -8,12 +8,12 @@
  */
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
-import { requireUser, jsonError } from "@/server/auth/require-user";
+import { requireUserForMutation, jsonError } from "@/server/auth/require-user";
 import { trashFile } from "@/server/storage/drive-client";
 
-export async function DELETE(_req: Request, ctx: { params: Promise<{ id: string }> }) {
+export async function DELETE(req: Request, ctx: { params: Promise<{ id: string }> }) {
   const { id } = await ctx.params;
-  const auth = await requireUser();
+  const auth = await requireUserForMutation(req);
   if (!auth.ok) return auth.response;
 
   const file = await prisma.file.findUnique({

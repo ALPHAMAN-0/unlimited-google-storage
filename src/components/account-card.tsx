@@ -6,6 +6,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
 import { Trash2, AlertTriangle, CheckCircle2 } from "lucide-react";
+import { useCsrf } from "@/lib/use-csrf";
 
 export interface AccountCardData {
   id: string;
@@ -19,10 +20,11 @@ export interface AccountCardData {
   lastSyncedAt: string | null;
 }
 
-export function AccountCard({ account }: { account: AccountCardData }) {
+export function AccountCard({ account, csrfToken }: { account: AccountCardData; csrfToken: string }) {
   const router = useRouter();
   const [pending, startTransition] = useTransition();
   const [err, setErr] = useState<string | null>(null);
+  const { withCsrf } = useCsrf(csrfToken);
 
   const used = BigInt(account.storageUsed);
   const limit = BigInt(account.storageLimit);
@@ -33,7 +35,7 @@ export function AccountCard({ account }: { account: AccountCardData }) {
       return;
     }
     setErr(null);
-    const res = await fetch(`/api/links/${account.id}`, { method: "DELETE" });
+    const res = await fetch(`/api/links/${account.id}`, withCsrf({ method: "DELETE" }));
     if (!res.ok) {
       const j = await res.json().catch(() => ({}));
       setErr(j.error || "Failed to unlink");

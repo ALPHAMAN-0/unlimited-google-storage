@@ -7,18 +7,19 @@
  * the account that received the upload.
  */
 import { NextResponse } from "next/server";
-import { requireUser, jsonError } from "@/server/auth/require-user";
+import { requireUserForMutation, jsonError } from "@/server/auth/require-user";
 import { uploadFile, UploadValidationError } from "@/server/storage/uploader";
 import { NoSpaceError } from "@/server/storage/picker";
 import { env } from "@/lib/env";
 import { rateLimit } from "@/lib/rate-limit";
+import { normalizeMimeType } from "@/lib/validate";
 
 export const runtime = "nodejs";
 // Allow large bodies. Next.js will reject anything larger.
 export const maxDuration = 300; // 5 minutes per request
 
 export async function POST(req: Request) {
-  const auth = await requireUser();
+  const auth = await requireUserForMutation(req);
   if (!auth.ok) return auth.response;
 
   // Per-user rate limit: 60 uploads / 10 minutes.
@@ -33,13 +34,17 @@ export async function POST(req: Request) {
   let form: FormData;
   try {
     form = await req.formData();
-  } catch (err) {
-    return jsonError(`Could not parse form data: ${(err as Error).message}`, 400);
+  } catch {
+    // Do not echo the parser's message — it can contain internals.
+    return jsonError("Could not parse form data", 400);
   }
 
   const file = form.get("file");
   if (!(file instanceof File)) {
     return jsonError("missing 'file' field", 400);
+  }
+  if (file.size === 0) {
+    return jsonError("file is empty", 400);
   }
   if (BigInt(file.size) > env.MAX_UPLOAD_BYTES) {
     return jsonError(`file exceeds MAX_UPLOAD_BYTES (${env.MAX_UPLOAD_BYTES})`, 413);
@@ -49,7 +54,9 @@ export async function POST(req: Request) {
     const result = await uploadFile({
       userId: auth.user.userId,
       fileName: file.name,
-      mimeType: file.type || "application/octet-stream",
+      // The client controls `file.type`; validate its shape before it is
+      // forwarded to the Drive API.
+      mimeType: normalizeMimeType(file.type),
       size: BigInt(file.size),
       body: file.stream(),
     });
@@ -67,7 +74,10 @@ export async function POST(req: Request) {
     if (err instanceof NoSpaceError) {
       return jsonError(err.message, 507); // Insufficient Storage
     }
-    const msg = err instanceof Error ? err.message : "upload_failed";
-    return jsonError(msg, 500);
+    // Log the real cause server-side; return a generic message to the client
+    // so we don't leak Drive/Prisma internals.
+    // eslint-disable-next-line no-console
+    console.error("Upload failed", err instanceof Error ? err.message : String(err));
+    return jsonError("Upload failed. Please try again.", 500);
   }
 }

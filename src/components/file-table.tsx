@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Download, Trash2, FileText } from "lucide-react";
+import { useCsrf } from "@/lib/use-csrf";
 
 export interface FileRow {
   id: string;
@@ -16,10 +17,11 @@ export interface FileRow {
   uploadedAt: string;
 }
 
-export function FileTable({ files }: { files: FileRow[] }) {
+export function FileTable({ files, csrfToken }: { files: FileRow[]; csrfToken: string }) {
   const router = useRouter();
   const [, startTransition] = useTransition();
   const [deleting, setDeleting] = useState<string | null>(null);
+  const { withCsrf } = useCsrf(csrfToken);
 
   if (files.length === 0) {
     return (
@@ -34,9 +36,12 @@ export function FileTable({ files }: { files: FileRow[] }) {
   async function remove(id: string) {
     if (!confirm("Delete this file? It will also be removed from your Google Drive.")) return;
     setDeleting(id);
-    await fetch(`/api/files/${id}`, { method: "DELETE" });
-    setDeleting(null);
-    startTransition(() => router.refresh());
+    try {
+      await fetch(`/api/files/${id}`, withCsrf({ method: "DELETE" }));
+    } finally {
+      setDeleting(null);
+      startTransition(() => router.refresh());
+    }
   }
 
   return (

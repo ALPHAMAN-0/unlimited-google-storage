@@ -4,6 +4,7 @@ import { useCallback, useState } from "react";
 import { useDropzone } from "react-dropzone";
 import { Card, CardContent } from "@/components/ui/card";
 import { Cloud, CheckCircle2, AlertCircle, Loader2 } from "lucide-react";
+import { useCsrf } from "@/lib/use-csrf";
 
 interface PendingUpload {
   id: string;
@@ -14,8 +15,9 @@ interface PendingUpload {
   account?: string;
 }
 
-export function UploadDropzone() {
+export function UploadDropzone({ csrfToken }: { csrfToken: string }) {
   const [uploads, setUploads] = useState<PendingUpload[]>([]);
+  const { withCsrf } = useCsrf(csrfToken);
 
   const onDrop = useCallback(async (files: File[]) => {
     for (const file of files) {
@@ -26,7 +28,7 @@ export function UploadDropzone() {
       form.append("file", file);
 
       try {
-        const res = await fetch("/api/uploads", { method: "POST", body: form });
+        const res = await fetch("/api/uploads", withCsrf({ method: "POST", body: form }));
         const body = await res.json().catch(() => ({}));
         if (!res.ok) {
           setUploads((prev) =>
@@ -49,7 +51,7 @@ export function UploadDropzone() {
         );
       }
     }
-  }, []);
+  }, [withCsrf]);
 
   const { getRootProps, getInputProps, isDragActive } = useDropzone({
     onDrop,

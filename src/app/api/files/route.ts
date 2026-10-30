@@ -6,7 +6,7 @@
  */
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
-import { requireUser, jsonError } from "@/server/auth/require-user";
+import { requireUser, requireUserForMutation, jsonError } from "@/server/auth/require-user";
 import { formatBytes } from "@/lib/format";
 
 const MAX_LIMIT = 50;
@@ -23,13 +23,23 @@ export async function GET(req: Request) {
     Math.max(1, parseInt(url.searchParams.get("limit") ?? `${DEFAULT_LIMIT}`, 10) || DEFAULT_LIMIT)
   );
 
-  const files = await prisma.file.findMany({
-    where: { userId: auth.user.userId, deletedAt: null },
-    take: limit + 1,
-    ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
-    orderBy: [{ uploadedAt: "desc" }, { id: "desc" }],
-    include: { googleLink: { select: { googleEmail: true } } },
-  });
+  let files;
+  try {
+    files = await prisma.file.findMany({
+      where: { userId: auth.user.userId, deletedAt: null },
+      take: limit + 1,
+      ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
+      orderBy: [{ uploadedAt: "desc" }, { id: "desc" }],
+      include: { googleLink: { select: { googleEmail: true } } },
+    });
+  } catch (err) {
+    // A cursor that doesn't exist (or belongs to another user) makes Prisma
+    // throw P2025. That is a client error, not a server error — return 400
+    // instead of a 500 with a stack trace.
+    // eslint-disable-next-line no-console
+    console.warn("File list failed", err instanceof Error ? err.message : String(err));
+    return jsonError("invalid cursor", 400);
+  }
 
   const hasMore = files.length > limit;
   const page = files.slice(0, limit);
@@ -51,7 +61,7 @@ export async function GET(req: Request) {
 
 /** DELETE /api/files — bulk delete (rarely used; per-file route is preferred). */
 export async function DELETE(req: Request) {
-  const auth = await requireUser();
+  const auth = await requireUserForMutation(req);
   if (!auth.ok) return auth.response;
   let body: unknown;
   try {
