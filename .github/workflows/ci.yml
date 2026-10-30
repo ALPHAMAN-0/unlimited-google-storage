@@ -6,8 +6,58 @@ on:
   pull_request:
     branches: [main]
 
+# Cancel in-flight runs when a newer commit lands on the same branch.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  DATABASE_URL: postgresql://ugs:ugs@localhost:5432/ugs
+  NEXTAUTH_SECRET: ci-test-secret-32-bytes-padding-1234
+  NEXTAUTH_URL: http://localhost:3000
+  GOOGLE_CLIENT_ID: ci-client-id
+  GOOGLE_CLIENT_SECRET: ci-client-secret
+  TOKEN_ENCRYPTION_KEY: MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=
+  CRON_SECRET: ci-cron-secret
+
 jobs:
-  build:
+  # ---------------------------------------------------------------------------
+  # Fast feedback: typecheck + lint + unit/integration tests. No database and
+  # no build, so this job is quick and is the one that fails first on a
+  # broken change.
+  # ---------------------------------------------------------------------------
+  test:
+    name: Tests (unit + integration)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+      - run: npm ci
+      - name: Typecheck
+        run: npx tsc --noEmit
+      - name: Lint
+        run: npm run lint
+      - name: Unit + integration tests (with coverage thresholds)
+        run: npx vitest run --coverage
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: coverage
+          retention-days: 7
+
+  # ---------------------------------------------------------------------------
+  # Database-backed checks: applies the real Prisma migrations to a real
+  # Postgres and verifies the schema is what we expect. This catches the case
+  # where a migration is missing from the repo (which makes `migrate deploy`
+  # silently succeed while creating no tables).
+  # ---------------------------------------------------------------------------
+  db:
+    name: Database migrations
     runs-on: ubuntu-latest
     services:
       postgres:
@@ -22,14 +72,6 @@ jobs:
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
-    env:
-      DATABASE_URL: postgresql://ugs:ugs@localhost:5432/ugs
-      NEXTAUTH_SECRET: ci-test-secret-32-bytes-padding-1234
-      NEXTAUTH_URL: http://localhost:3000
-      GOOGLE_CLIENT_ID: ci-client-id
-      GOOGLE_CLIENT_SECRET: ci-client-secret
-      TOKEN_ENCRYPTION_KEY: MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=
-      CRON_SECRET: ci-cron-secret
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -37,14 +79,154 @@ jobs:
           node-version: "22"
           cache: "npm"
       - run: npm ci
-      - run: npx prisma migrate deploy
-      - run: npx tsc --noEmit
-      - run: npm run lint
-      - run: npx vitest run --coverage
+      - name: Apply migrations
+        run: npx prisma migrate deploy
+      - name: Create the shadow database
+        run: psql "postgresql://ugs:ugs@localhost:5432/postgres" -c "CREATE DATABASE ugs_shadow;"
+      - name: Verify migrations match the schema
+        run: npx prisma migrate diff --exit-code --from-migrations prisma/migrations --to-schema-datamodel prisma/schema.prisma --shadow-database-url postgresql://ugs:ugs@localhost:5432/ugs_shadow
+      - name: Assert the expected tables exist
+        run: |
+          for t in User GoogleLink File UploadJob; do
+            exists=$(psql "postgresql://ugs:ugs@localhost:5432/ugs" -tAc "SELECT to_regclass('public.\"$t\"') IS NOT NULL")
+            if [ "$exists" != "t" ]; then
+              echo "::error::expected table '$t' was not created by the migrations"
+              exit 1
+            fi
+            echo "table $t OK"
+          done
+
+  # ---------------------------------------------------------------------------
+  # Production build. Confirms the app compiles with the real Next.js
+  # compiler, including the security headers and the new CSRF plumbing.
+  # ---------------------------------------------------------------------------
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+      - run: npm ci
       - run: npm run build
-      - run: npm audit --omit=dev --audit-level=high
       - uses: actions/upload-artifact@v4
         if: failure()
         with:
           name: build-trace
           path: .next/trace
+
+  # ---------------------------------------------------------------------------
+  # End-to-end tests against a real browser. Playwright drives the actual
+  # Next.js server, so it verifies the routes render and the security headers
+  # are present on real responses.
+  # ---------------------------------------------------------------------------
+  e2e:
+    name: E2E (Playwright)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: ugs
+          POSTGRES_PASSWORD: ugs
+          POSTGRES_DB: ugs
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+      - run: npm ci
+      - name: Apply migrations
+        run: npx prisma migrate deploy
+      - name: Install Playwright browsers
+        run: npx playwright install --with-deps chromium
+      - name: Run Playwright tests
+        run: npx playwright test
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: playwright-report
+          path: playwright-report
+          retention-days: 7
+
+  # ---------------------------------------------------------------------------
+  # End-to-end tests against a *production* build.
+  #
+  # The dev server keeps 'unsafe-inline' and 'unsafe-eval' in script-src
+  # (React Fast Refresh needs eval), so the dev-server E2E job can never
+  # exercise the strict production CSP. We shipped a broken production CSP
+  # once: the landing page rendered blank because Next.js's inline bootstrap
+  # scripts were blocked, while every dev-server test still passed. This job
+  # runs the same suite against `npm run start` so that class of failure
+  # fails the pipeline.
+  # ---------------------------------------------------------------------------
+  e2e-production:
+    name: E2E (production build)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: ugs
+          POSTGRES_PASSWORD: ugs
+          POSTGRES_DB: ugs
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+      - run: npm ci
+      - name: Install Playwright browsers
+        run: npx playwright install --with-deps chromium
+      - name: Apply migrations
+        run: npx prisma migrate deploy
+      - name: Build
+        run: npm run build
+      - name: Run Playwright tests against the production server
+        run: npx playwright test
+        env:
+          PLAYWRIGHT_PRODUCTION: "1"
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: playwright-report-production
+          path: playwright-report
+          retention-days: 7
+
+  # ---------------------------------------------------------------------------
+  # Dependency audit. This blocks the pipeline: the production dependency set
+  # is currently clean (0 advisories at every severity), so a regression that
+  # reintroduces a known RCE in the framework must fail CI rather than wait
+  # for a human to notice.
+  #
+  # `--omit=dev` scopes the check to what actually ships. The dev toolchain
+  # (vite/vitest/esbuild) still carries advisories that affect only the local
+  # dev server; see docs/SECURITY.md -> Residual risks.
+  # ---------------------------------------------------------------------------
+  audit:
+    name: Dependency audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+      - run: npm ci
+      - run: npm audit --omit=dev --audit-level=moderate
