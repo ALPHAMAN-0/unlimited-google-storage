@@ -36,6 +36,12 @@ jobs:
           node-version: "22"
           cache: "npm"
       - run: npm ci
+      - name: Malware guard
+        # The repository was force-pushed with an obfuscated crypto-mining
+        # payload (see the commit "fix: remove crypto-mining malware from the
+        # repository"). This step fails the pipeline if that payload — or any
+        # variant sharing its obfuscator signature — reappears.
+        run: npx vitest run tests/unit/malware.test.ts
       - name: Typecheck
         run: npx tsc --noEmit
       - name: Lint

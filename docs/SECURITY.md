@@ -26,6 +26,58 @@ here is covered by an automated test that runs in CI on every push.
 | File uploads | PASS | Size cap enforced before work. Streamed (not buffered). Filenames never used in server filesystem paths. |
 | Secret comparison | PASS | The cron secret is compared with `timingSafeEqual`, not `===`, so a timing side channel cannot recover it byte by byte. |
 | Dependency security | PASS | `npm audit --omit=dev` reports **0 vulnerabilities** at every severity. See "Dependency security" below. |
+| Supply chain | PASS | The crypto-mining payload that was force-pushed to `main` has been removed, with a structural regression guard in CI. See "Supply-chain incident" below. |
+
+## Supply-chain incident: crypto-mining malware (2026-10-30)
+
+`main` was force-pushed to a commit (`45edc11`) that carried an obfuscated
+crypto-mining payload in **three** places. All three were variants produced by
+the same obfuscator — an RC4-encrypted string table decoded by `splitLane` /
+`peel` / `spin` helpers:
+
+| File | Trigger | Scope |
+|---|---|---|
+| `init` | `npm run dev` / `build` / `start` (`node init && …`) | Every dev machine and every CI runner |
+| `postcss.config.mjs` | import time — the build loads it | Every `next build` |
+| `src/app/api/auth/callback/link/public/fonts/fa-brand-400.orc` | A hidden VS Code task (`runOn: folderOpen`, `hide: true`) that ran `node …/fa-brand-400.orc` | Anyone opening the folder in VS Code |
+
+At runtime the payload beacons `eth_blockNumber` to public Ethereum RPC
+endpoints (`1rpc.io`, `eth.drpc.org`, `ethereum-rpc.publicnode.com`,
+`eth-mainnet.public.blastapi.io`), which both marks the infected host and
+proxies its mining traffic.
+
+The same commit also dropped `.env`, `.env.local`, `.env.production` and
+`.vscode` from `.gitignore`, leaving `.env.production` untracked and exposed.
+
+**What was done**
+
+- All three payloads removed; `postcss.config.mjs` restored to its clean form.
+- The `.gitignore` entries restored.
+- `tests/unit/malware.test.ts` added as a **structural** regression guard. It
+  matches on the obfuscator's fingerprint rather than a file hash, because the
+  payload regenerates itself on every build — a hash allowlist would miss
+  variants. It fails the pipeline if the payload files return, if a script
+  re-wires `node init`, if a VS Code task shells out to a local script, or if
+  the obfuscator signature or the RPC beacon appears anywhere in the tree.
+- CI runs the guard as a named `Malware guard` step before the rest of the
+  suite, so a reintroduction fails with an unambiguous reason.
+
+**What you must do regardless of this repository**
+
+The payload ran on any machine that built the compromised `main`, and on
+GitHub Actions runners if a build was triggered while it was present. Treat the
+following as compromised and rotate them:
+
+- `GOOGLE_CLIENT_SECRET`
+- `NEXTAUTH_SECRET`
+- `TOKEN_ENCRYPTION_KEY` — rotating this invalidates every stored Drive
+  refresh token, so users must re-link their accounts. That is the intended
+  outcome; the alternative is leaving recoverable tokens on disk.
+- any other secret that was present in `.env`, `.env.local` or
+  `.env.production` on a machine that ran the compromised build.
+
+Also review the Actions logs for the affected window for outbound connections
+to the four RPC hosts above.
 
 ## CSRF protection
 

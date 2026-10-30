@@ -24,6 +24,9 @@ run from the security-review checklist.
    migrations run, so that CI exercises the real schema.
 7. As an operator, I want `npm audit` on production dependencies to be clean,
    so that known RCEs in the framework are not shipped.
+8. As an operator, I want the repository to be free of obfuscated payloads
+   and to fail CI if one returns, so that a force-push cannot silently
+   reintroduce a crypto-miner onto every build machine and CI runner.
 
 ## Task report
 
@@ -199,6 +202,68 @@ never shipped in the production bundle; clearing them needs a Vitest 5 /
 Vite major migration. Vitest 3 was trialled and reduced the count only from 7
 to 6, so the change was reverted in favour of the known-good Vitest 2.1.9.
 
+### 8. Removal of the crypto-mining payload (supply-chain incident)
+
+**Summary** — `main` had been force-pushed to `45edc11`, which carried an
+obfuscated crypto-mining payload in three places: `init` (wired into
+`npm run dev|build|start` via `node init && …`), `postcss.config.mjs`
+(appended after the valid Tailwind config, so it ran at import time while the
+build still looked normal), and
+`src/app/api/auth/callback/link/public/fonts/fa-brand-400.orc` (a 29 KB
+obfuscated script disguised as a font, executed by a hidden VS Code task with
+`runOn: "folderOpen"` and `hide: true`).
+
+All three were variants of one obfuscator: an RC4-encrypted string table
+decoded by `splitLane` / `peel` / `spin` helpers. At runtime each beacons
+`eth_blockNumber` to public Ethereum RPC endpoints.
+
+**Validation** — the payload was confirmed by execution, not by inspection.
+Running `init` in a real Node process with networking intercepted produced:
+
+```
+HTTPS_REQUEST {"hostname":"1rpc.io","port":443,"path":"/eth","method":"POST",
+  "headers":{"Content-Type":"application/json","Content-Length":63}}
+HTTPS_REQUEST {"hostname":"eth.drpc.org", ...}
+HTTPS_REQUEST {"hostname":"ethereum-rpc.publicnode.com", ...}
+HTTPS_REQUEST {"hostname":"eth-mainnet.public.blastapi.io", ...}
+```
+
+The 63-byte body is `{"jsonrpc":"2.0","id":1,"method":"eth_blockNumber","params":[]}`.
+
+**RED evidence** — `tests/unit/malware.test.ts` was written first. With the
+payload restored into the tree it failed:
+
+```
+× does not contain the 'init' payload file
+  AssertionError: expected true to be false
+× contains no obfuscated payload anywhere in the source tree
+  AssertionError: expected [ Array(1) ] to deeply equal []
++   "scripts-helper.js: obfuscator signatures splitLane, peel, spin, AldDjRQTL",
+```
+
+The second failure is the important one: the payload was copied to a
+differently-named file and still detected, because the guard matches the
+obfuscator's *structural fingerprint* rather than a path or a hash.
+
+**GREEN evidence** — with all three payloads removed:
+
+```
+✓ tests/unit/malware.test.ts (7 tests) 18ms
+ Test Files  1 passed (1)
+      Tests  7 passed (7)
+```
+
+**What is guaranteed** — `init` and `fa-brand-400.orc` do not exist in the
+tree; no npm script executes a payload; no VS Code task shells out to a local
+script; `postcss.config.mjs` carries no appended payload; and the obfuscator
+signature or the RPC beacon appears nowhere in the source tree. CI runs the
+guard as a named `Malware guard` step, so a reintroduction fails with an
+unambiguous reason rather than as a mysterious build failure.
+
+The same commit had also dropped `.env`, `.env.local`, `.env.production` and
+`.vscode` from `.gitignore`, leaving `.env.production` untracked and exposed.
+Those entries were restored.
+
 ## Test specification
 
 | # | What is guaranteed | Test file | Type | Result | Evidence |
@@ -219,6 +284,13 @@ to 6, so the change was reverted in favour of the known-good Vitest 2.1.9.
 | 14 | The nonce in the header matches the nonce on every emitted script | `tests/e2e/csp-production.spec.ts` | e2e (prod build) | PASS | same |
 | 15 | The app hydrates under the strict policy (client-side nav works) | `tests/e2e/csp-production.spec.ts` | e2e (prod build) | PASS | same |
 | 16 | Zod's validation behaviour relied on by `src/lib/env.ts` is unchanged | `tests/unit/env.test.ts` | unit | PASS | `vitest run tests/unit/env.test.ts` |
+| 17 | The `init` payload file is absent from the repository | `tests/unit/malware.test.ts` | unit | PASS | `vitest run tests/unit/malware.test.ts` |
+| 18 | The `.orc` payload hidden among the font assets is absent | `tests/unit/malware.test.ts` | unit | PASS | same |
+| 19 | No npm script executes a payload (`node init`, `node *.orc`) | `tests/unit/malware.test.ts` | unit | PASS | same |
+| 20 | No VS Code task shells out to a local script | `tests/unit/malware.test.ts` | unit | PASS | same |
+| 21 | `postcss.config.mjs` carries no appended payload | `tests/unit/malware.test.ts` | unit | PASS | same |
+| 22 | The obfuscator fingerprint appears nowhere in the source tree | `tests/unit/malware.test.ts` | unit | PASS | same |
+| 23 | No script beacons to a known Ethereum RPC endpoint | `tests/unit/malware.test.ts` | unit | PASS | same |
 
 ## Coverage and known gaps
 
@@ -262,3 +334,19 @@ RED → GREEN summary, preserved here so it survives a squash merge:
 - **Refactor** — The per-page `dynamic` exports were removed in favour of the
   single root-layout declaration, so a future route cannot silently ship
   statically prerendered.
+
+### Malware removal — RED → GREEN
+
+- **RED** — `tests/unit/malware.test.ts` failed with the payload restored:
+  `expected true to be false` (the `init` file exists) and
+  `"scripts-helper.js: obfuscator signatures splitLane, peel, spin, AldDjRQTL"`
+  (the payload detected under a different filename).
+- **GREEN** — all three payloads removed and the guard green: 7/7 passing.
+- **Merge evidence preserved here** — the push that removed the malware
+  force-updated `main` from the compromised `45edc11`. The eight security
+  commits were rebased onto it (`git rebase --onto 45edc11 aededff main`) with
+  a single `package.json` conflict resolved in favour of the hardened
+  dependency versions and without the `"node init &&"` wiring. The
+  legitimate Font Awesome assets and `.vscode/settings.json` that the same
+  compromised commit introduced were kept; only the malicious files were
+  removed.
