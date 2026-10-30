@@ -15,6 +15,21 @@ const geistMono = localFont({
   display: "swap",
 });
 
+/**
+ * Render every route per request.
+ *
+ * The production Content-Security-Policy is nonce-based. Next.js only stamps
+ * the nonce onto the inline bootstrap scripts it emits when the HTML is
+ * rendered at request time — a statically prerendered page is built ahead of
+ * time with no request context, so its scripts carry no nonce, the browser
+ * blocks them, and the page renders blank.
+ *
+ * Declaring this in the *root* layout covers every route beneath it,
+ * including the built-in `_not-found` page and any route added later, so a
+ * new page can never silently ship with a blank-page CSP failure.
+ */
+export const dynamic = "force-dynamic";
+
 export const metadata: Metadata = {
   title: "Unlimited Google Storage",
   description:
