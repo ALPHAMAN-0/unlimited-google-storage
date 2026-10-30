@@ -21,6 +21,7 @@ export default defineConfig({
         "src/lib/validate.ts",
         "src/lib/rate-limit.ts",
         "src/lib/utils.ts",
+        "src/lib/csrf.ts",
         "src/server/storage/picker.ts",
       ],
       thresholds: {
