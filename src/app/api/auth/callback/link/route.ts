@@ -13,6 +13,7 @@ import {
   fetchGoogleUserInfo,
 } from "@/server/auth/link-flow";
 import { encrypt } from "@/lib/crypto";
+import { sanitizeLinkError } from "@/lib/validate";
 
 export async function GET(req: Request) {
   const url = new URL(req.url);
@@ -21,8 +22,10 @@ export async function GET(req: Request) {
   const error = url.searchParams.get("error");
 
   if (error) {
+    // Sanitise the provider-supplied error code so we only ever redirect
+    // with a short, whitelisted token.
     return NextResponse.redirect(
-      new URL(`/dashboard?link_error=${encodeURIComponent(error)}`, url.origin)
+      new URL(`/dashboard?link_error=${sanitizeLinkError(error)}`, url.origin)
     );
   }
   if (!code || !state) {
@@ -46,9 +49,12 @@ export async function GET(req: Request) {
   try {
     tokens = await exchangeCodeForTokens(code, redirectUri);
   } catch (err) {
-    const msg = err instanceof Error ? err.message : "exchange_failed";
+    // Log the real reason server-side; redirect with a generic code so we
+    // don't echo Google's error body (which can contain sensitive detail).
+    // eslint-disable-next-line no-console
+    console.error("Token exchange failed", err instanceof Error ? err.message : String(err));
     return NextResponse.redirect(
-      new URL(`/dashboard?link_error=${encodeURIComponent(msg)}`, url.origin)
+      new URL("/dashboard?link_error=exchange_failed", url.origin)
     );
   }
 
@@ -56,9 +62,10 @@ export async function GET(req: Request) {
   try {
     profile = await fetchGoogleUserInfo(tokens.access_token);
   } catch (err) {
-    const msg = err instanceof Error ? err.message : "userinfo_failed";
+    // eslint-disable-next-line no-console
+    console.error("Userinfo fetch failed", err instanceof Error ? err.message : String(err));
     return NextResponse.redirect(
-      new URL(`/dashboard?link_error=${encodeURIComponent(msg)}`, url.origin)
+      new URL("/dashboard?link_error=userinfo_failed", url.origin)
     );
   }
 
