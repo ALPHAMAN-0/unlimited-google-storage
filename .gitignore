@@ -48,4 +48,3 @@ prisma/migrations/dev/
 .history
 *.swp
 *.swo
-config.bat
